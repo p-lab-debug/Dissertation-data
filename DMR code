@@ -1,0 +1,241 @@
+# First, install and load dmrff if needed
+if (!requireNamespace("dmrff", quietly = TRUE)) {
+  install.packages("devtools")
+  devtools::install_github("perishky/dmrff")
+}
+# Load required libraries
+library(dmrff)
+library(mgcv)
+library(minfi)
+library(IlluminaHumanMethylationEPICv2anno.20a1.hg38)
+library(dplyr)
+
+# Set your working directory for iDats
+idat_dir <- setwd("~/Desktop/pseudotime_methylation/iDats")
+
+# Read IDATs
+rgSet <- read.metharray.exp(base = idat_dir)
+annotation(rgSet)  # Should say "IlluminaHumanMethylationEPICv2"
+head(rgSet)
+
+# Preprocess: noob normalization
+mSet <- preprocessNoob(rgSet)
+
+# Extract beta values
+methylation <- getBeta(mSet)  # CpGs × samples
+
+
+rownames(outtab) <- outtab$CpG_ID # outtab is the loaded "iMicroEWASout.rdat" file
+anno_df$CpG_ID_clean <- sub("_.*", "", anno_df$Name) # Merge using cleaned CpG IDs - anno_df is theIlluminaHumanMethylationEPICv2anno.20a1.hg38 as dataframe
+outtab_annot <- merge(outtab, anno_df, by = "CpG_ID_clean", all.x = TRUE)
+
+
+# Create stats dataframe for R47H
+r47h_stats <- data.frame(
+  CpG_ID   = outtab_annot$CpG_ID,  # original CpG ID with suffix
+  CpG_ID_clean = outtab_annot$CpG_ID_clean,
+  estimate = outtab_annot$Cell_LineTREM2_R47H_coeff,
+  se       = outtab_annot$Cell_LineTREM2_R47H_SE,
+  p.value  = outtab_annot$Cell_LineTREM2_R47H_P,
+  chr      = outtab_annot$chr,
+  pos      = outtab_annot$pos
+)
+# Remove NAs across relevant columns
+r47h_stats <- r47h_stats[complete.cases(r47h_stats[, c("estimate", "se", "p.value", "chr", "pos")]), ]
+
+# Remove duplicate CpG_ID_clean values
+r47h_stats <- r47h_stats[!duplicated(r47h_stats$CpG_ID_clean), ]
+
+# Set CpG_ID_clean as rownames for dmrff compatibility
+rownames(r47h_stats) <- r47h_stats$CpG_ID
+
+# Subset methylation matrix to just CpGs in your stats
+outtab_annot_unique <- outtab_annot %>%
+  group_by(CpG_ID) %>%
+  slice_min(order_by = Cell_LineTREM2_R47H_P, n = 1, with_ties = FALSE) %>%
+  ungroup()
+rownames(outtab_annot_unique) <- outtab_annot_unique$CpG_ID
+common_cpgs <- intersect(rownames(methylation), rownames(outtab_annot_unique))
+methylation_sub <- methylation[common_cpgs, ]
+r47h_stats <- r47h_stats[common_cpgs, ]
+
+dmrs_r47h <- dmrff(
+  estimate    = r47h_stats$estimate,
+  se          = r47h_stats$se,
+  p.value     = r47h_stats$p.value,
+  methylation = methylation_sub,
+  chr         = r47h_stats$chr,
+  pos         = r47h_stats$pos,
+  maxgap      = 500,
+  verbose     = TRUE
+)
+
+dmrs_r47h <- dmrs_r47h[which(dmrs_r47h$p.adjust < 0.05 & dmrs_r47h$n > 6),] # Only keep regions with > 6 CpG sites and Bonferroni adjusted p < 0.05.
+
+# Create stats dataframe for P522R
+p522r_stats <- data.frame(
+  CpG_ID        = outtab_annot$CpG_ID,        # original CpG ID with suffix
+  CpG_ID_clean  = outtab_annot$CpG_ID_clean,
+  estimate      = outtab_annot$Cell_LinePLCG2_P522R_coeff,
+  se            = outtab_annot$Cell_LinePLCG2_P522R_SE,
+  p.value       = outtab_annot$Cell_LinePLCG2_P522R_P,
+  chr           = outtab_annot$chr,
+  pos           = outtab_annot$pos
+)
+
+# Remove NAs across relevant columns
+p522r_stats <- p522r_stats[complete.cases(p522r_stats[, c("estimate", "se", "p.value", "chr", "pos")]), ]
+
+# Remove duplicate CpG_ID_clean values
+p522r_stats <- p522r_stats[!duplicated(p522r_stats$CpG_ID_clean), ]
+
+# Set CpG_ID as rownames
+rownames(p522r_stats) <- p522r_stats$CpG_ID
+
+# Subset methylation matrix to just CpGs in your stats
+outtab_annot_unique_p522r <- outtab_annot %>%
+  group_by(CpG_ID) %>%
+  slice_min(order_by = Cell_LinePLCG2_P522R_P, n = 1, with_ties = FALSE) %>%
+  ungroup()
+rownames(outtab_annot_unique_p522r) <- outtab_annot_unique_p522r$CpG_ID
+
+common_cpgs_p522r <- intersect(rownames(methylation), rownames(outtab_annot_unique_p522r))
+methylation_sub_p522r <- methylation[common_cpgs_p522r, ]
+p522r_stats <- p522r_stats[common_cpgs_p522r, ]
+
+# Run dmrff
+dmrs_p522r <- dmrff(
+  estimate    = p522r_stats$estimate,
+  se          = p522r_stats$se,
+  p.value     = p522r_stats$p.value,
+  methylation = methylation_sub_p522r,
+  chr         = p522r_stats$chr,
+  pos         = p522r_stats$pos,
+  maxgap      = 500,
+  verbose     = TRUE
+)
+
+dmrs_p522r <- dmrs_p522r[which(dmrs_p522r$p.adjust < 0.05 & dmrs_p522r$n > 6),] # Only keep regions with > 6 CpG site and Bonferroni adjusted p < 0.05.
+
+# Add region identifiers
+dmrs_r47h$region <- paste0(dmrs_r47h$chr, ":", dmrs_r47h$start, "-", dmrs_r47h$end)
+dmrs_p522r$region <- paste0(dmrs_p522r$chr, ":", dmrs_p522r$start, "-", dmrs_p522r$end)
+
+# Merge on region
+shared_dmrs <- inner_join(
+  dmrs_r47h[, c("region", "estimate", "p.value")],
+  dmrs_p522r[, c("region", "estimate", "p.value")],
+  by = "region",
+  suffix = c("_r47h", "_p522r")
+)
+
+# Add column comparing sign of the estimates
+shared_dmrs$Consistent <- sign(shared_dmrs$estimate_r47h) == sign(shared_dmrs$estimate_p522r)
+
+# Following script annotates the shared dmrs with CpGIDs and known associated genes
+library(GenomicRanges)
+library(dplyr)
+library(stringr)
+
+# Create GRanges for DMRs
+r47h_dmr_gr <- GRanges(
+  seqnames = dmrs_r47h$chr,
+  ranges = IRanges(dmrs_r47h$start, dmrs_r47h$end),
+  region = dmrs_r47h$region
+)
+
+# Filter out incomplete rows
+r47h_stats_clean <- r47h_stats %>%
+  filter(!is.na(chr) & !is.na(pos))
+
+# Create GRanges for CpGs (r47h_stats must have 'chr' and 'pos' columns)
+r47h_cpg_gr <- GRanges(
+  seqnames = r47h_stats_clean$chr,
+  ranges = IRanges(r47h_stats_clean$pos, r47h_stats_clean$pos),
+  CpG_ID = r47h_stats_clean$CpG_ID
+)
+
+# Find overlaps between CpGs and DMRs
+overlaps_r47h <- findOverlaps(r47h_cpg_gr, r47h_dmr_gr)
+
+# Create a data frame linking CpGs to DMRs
+cpg_to_dmr <- data.frame(
+  region = mcols(r47h_dmr_gr)$region[subjectHits(overlaps_r47h)],
+  CpG_ID = mcols(r47h_cpg_gr)$CpG_ID[queryHits(overlaps_r47h)]
+)
+
+# Join with EPICv2 manifest to add gene names - anno_df generated in EWAS_analysis script - dataframe of IlluminaHumanMethylationEPICv2anno.20a1.hg38
+annotated_cpgs <- cpg_to_dmr %>%
+  left_join(anno_df, by = c("CpG_ID" = "Name"))
+
+# Collapse to DMR-level summary
+dmr_annotations <- annotated_cpgs %>%
+  group_by(region) %>%
+  summarise(
+    cpg_sites = paste(unique(CpG_ID), collapse = "; "),
+    genes = paste(unique(na.omit(UCSC_RefGene_Name)), collapse = "; ")
+  )
+
+# Merge back into dmrs_r47h
+dmrs_r47h_annotated <- dmrs_r47h %>%
+  left_join(dmr_annotations, by = "region")
+
+# Repeat code for P522R
+p522r_dmr_gr <- GRanges(
+  seqnames = dmrs_p522r$chr,
+  ranges = IRanges(dmrs_p522r$start, dmrs_p522r$end),
+  region = dmrs_p522r$region
+)
+
+p522r_stats_clean <- p522r_stats %>%
+  filter(!is.na(chr) & !is.na(pos))
+
+p522r_cpg_gr <- GRanges(
+  seqnames = p522r_stats_clean$chr,
+  ranges = IRanges(p522r_stats_clean$pos, p522r_stats_clean$pos),
+  CpG_ID = p522r_stats_clean$CpG_ID
+)
+
+overlaps_p522r <- findOverlaps(p522r_cpg_gr, p522r_dmr_gr)
+
+cpg_to_dmr_p522r <- data.frame(
+  region = mcols(p522r_dmr_gr)$region[subjectHits(overlaps_p522r)],
+  CpG_ID = mcols(p522r_cpg_gr)$CpG_ID[queryHits(overlaps_p522r)]
+)
+
+annotated_cpgs_p522r <- cpg_to_dmr_p522r %>%
+  left_join(anno_df, by = c("CpG_ID" = "Name"))
+
+dmr_annotations_p522r <- annotated_cpgs_p522r %>%
+  group_by(region) %>%
+  summarise(
+    cpg_sites = paste(unique(CpG_ID), collapse = "; "),
+    genes = paste(unique(na.omit(UCSC_RefGene_Name)), collapse = "; ")
+  )
+
+shared_dmrs_annotated1 <- shared_dmrs %>%
+  left_join(dmrs_p522r_annotated, by = "region")
+
+shared_dmrs_annotated2 <- shared_dmrs %>%
+  left_join(dmrs_r47h_annotated, by = "region")
+
+shared_dmrs_annotated1 <- shared_dmrs_annotated %>%
+  mutate(
+    genes = sapply(strsplit(genes, ";\\s*"), function(x) paste(unique(x[!is.na(x) & x != ""]), collapse = "; ")))
+
+write.csv(shared_dmrs_annotated, file = "R47H_P522R_shared_dmrs.csv", row.names = FALSE)
+
+library(ggplot2)
+
+ggplot(shared_dmrs, aes(x = estimate_r47h, y = estimate_p522r, color = Consistent)) +
+  geom_point(alpha = 0.8, size = 2) +
+  theme_minimal() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = c("FALSE" = "red", "TRUE" = "steelblue")) +
+  labs(
+    title = "Effect Size Comparison: R47H vs P522R",
+    x = "R47H Estimate (Δβ)",
+    y = "P522R Estimate (Δβ)",
+    color = "Direction Consistent"
+  )
